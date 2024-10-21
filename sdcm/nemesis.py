@@ -2062,17 +2062,17 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             cmd=f'TRUNCATE {ks_name}.{table}{truncate_cmd_timeout_suffix}',
             timeout=truncate_timeout)
 
-    def _modify_table_property(self, name, val, filter_out_table_with_counter=False, keyspace_table=None):
+    def _modify_table_property(self, name, val, filter_out_table_with_counter=False, keyspace_table=None, entity_type=None):
         disruption_name = "".join([p.strip().capitalize() for p in name.split("_")])
         InfoEvent('ModifyTableProperties%s %s' % (disruption_name, self.target_node)).publish()
-
+        #entity_type = entity_type if entity_type else None
         if not keyspace_table:
             self.use_nemesis_seed()
 
             ks_cfs = self.cluster.get_non_system_ks_cf_list(
                 db_node=self.target_node, filter_out_table_with_counter=filter_out_table_with_counter,
-                filter_out_mv=True)  # not allowed to modify MV
-
+                filter_out_mv=True, entity_type=entity_type)  # not allowed to modify MV
+            InfoEvent('44444444444444444444444444444444444444444%s %s %s' % (ks_cfs, entity_type, self.target_node)).publish()
             keyspace_table = random.choice(ks_cfs) if ks_cfs else ks_cfs
 
         if not keyspace_table:
@@ -2634,18 +2634,18 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             }
         """
         strategies = [
-            {
-                'class': 'SizeTieredCompactionStrategy',
-                'bucket_high': 1.5,
-                'bucket_low': 0.5,
-                'min_sstable_size': 50,
-                'min_threshold': 4,
-                'max_threshold': 32,
-            },
-            {
-                'class': 'LeveledCompactionStrategy',
-                'sstable_size_in_mb': 160,
-            },
+            # {
+            #     'class': 'SizeTieredCompactionStrategy',
+            #     'bucket_high': 1.5,
+            #     'bucket_low': 0.5,
+            #     'min_sstable_size': 50,
+            #     'min_threshold': 4,
+            #     'max_threshold': 32,
+            # },
+            # {
+            #     'class': 'LeveledCompactionStrategy',
+            #     'sstable_size_in_mb': 160,
+            # },
             {
                 'class': 'TimeWindowCompactionStrategy',
                 'compaction_window_unit': 'DAYS',
@@ -2656,7 +2656,8 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             },
         ]
         prop_val = random.choice(strategies)
-        self._modify_table_property(name="compaction", val=str(prop_val))
+        InfoEvent('1111111111111111111111111111111111111').publish()
+        self._modify_table_property(name="compaction", val=str(prop_val), entity_type='table')
 
     def modify_table_compression(self):
         """
@@ -2703,6 +2704,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         #    But table with counters doesn't support this
 
         # max allowed TTL - 49 days (4300000) (to be compatible with default TWCS settings)
+        InfoEvent('333333333333333333333333333333333333333333').publish()
         self._modify_table_property(name="default_time_to_live", val=random.randint(864000, 4300000),
                                     filter_out_table_with_counter=True)
 
@@ -2771,7 +2773,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             if size of sstables in timewindow is differs significantly
         """
         self.use_nemesis_seed()
-
+        InfoEvent('2222222222222222222222222222222222222222222222222').publish()
         def set_new_twcs_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
             """ Recommended number of sstables for twcs is 20 - 30
                 if number of sstables more than 32, sstables are picked up
@@ -2835,25 +2837,50 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         self.log.debug("New TWCS settings: %s", str(ks_cs_settings))
         self._modify_table_property(
             name="compaction", val=ks_cs_settings["compaction"], keyspace_table=ks_cs_settings["name"])
+        InfoEvent('TTL MOD 1').publish()
         self._modify_table_property(name="default_time_to_live",
                                     val=ks_cs_settings["dttl"], keyspace_table=ks_cs_settings["name"])
+        InfoEvent('TTL MOD 2').publish()
         self._modify_table_property(name="gc_grace_seconds",
                                     val=ks_cs_settings["gc"], keyspace_table=ks_cs_settings["name"])
+        InfoEvent('TTL MOD 3').publish()
 
+        def chk_tbl(msg=None):
+            verify4 = """SELECT * 
+                        FROM system_schema.tables 
+                        WHERE keyspace_name = 'keyspace1' AND table_name = 'standard1';
+                        """
+            with self.cluster.cql_connection_patient(self.target_node) as session:
+                list_bbb = [verify4]
+                for cmd in list_bbb:
+                    result = session.execute(cmd)
+
+                    for row in result:
+                        if hasattr(row, 'compaction'):
+                            compaction_info = dict(row.compaction)  # Convert OrderedMapSerializedKey to dictionary
+                            if 'class' in compaction_info and compaction_info[
+                                'class'] == 'TimeWindowCompactionStrategy':
+                                InfoEvent(
+                                    'TimeWindowCompactionStrategy info 0000000000000000000000000000000000000000000000: %s' % compaction_info).publish()
+                        else:
+                            InfoEvent('88888888888888888888888888888888888 Row data: %s' % row).publish()
+
+        chk_tbl()
         self.cluster.wait_for_schema_agreement()
         # wait timeout  equal 2% of test duration for generating sstables with timewindow settings
         sleep_timeout = int(0.02 * self.tester.params["test_duration"])
         time.sleep(sleep_timeout)
-
+        InfoEvent('TTL MOD 4').publish()
         self.target_node.stop_scylla()
 
         reshape_twcs_records = self.target_node.follow_system_log(
             patterns=["need reshape. Starting reshape process",
                       "Reshaping",
                       f"Reshape {ks_cs_settings['name']} .* Reshaped"])
-
+        InfoEvent('TTL MOD 5').publish()
         self.target_node.start_scylla()
 
+        InfoEvent('TTL MOD 6').publish()
         reshape_twcs_records = list(reshape_twcs_records)
         if not reshape_twcs_records:
             self.log.warning("Log message with sstables for reshape was not found. Autocompaction already"
@@ -2885,9 +2912,14 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
 
     def disrupt_modify_table(self):
         # randomly select and run one of disrupt_modify_table* methods
-        disrupt_func_name = random.choice([dm for dm in dir(self) if dm.startswith("modify_table")])
-        disrupt_func = getattr(self, disrupt_func_name)
-        disrupt_func()
+        # disrupt_func_name = random.choice([dm for dm in dir(self) if dm.startswith("modify_table")])
+        # disrupt_func = getattr(self, disrupt_func_name)
+        # disrupt_func()
+
+        self.modify_table_compaction()
+        #chk_tbl(msg=True)
+        self.modify_table_twcs_window_size()
+        self.modify_table_default_time_to_live()
 
     def disrupt_mgmt_backup_specific_keyspaces(self):
         self._mgmt_backup(backup_specific_tables=True)

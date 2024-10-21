@@ -3659,36 +3659,47 @@ class BaseCluster:  # pylint: disable=too-many-instance-attributes,too-many-publ
     def get_non_system_ks_cf_list(self, db_node,  # pylint: disable=too-many-arguments
                                   filter_out_table_with_counter=False, filter_out_mv=False, filter_empty_tables=True,
                                   filter_by_keyspace: list = None,
-                                  filter_func: Callable[..., bool] = None) -> List[str]:
+                                  filter_func: Callable[..., bool] = None,
+                                  entity_type=None) -> List[str]:
         return self.get_any_ks_cf_list(db_node, filter_out_table_with_counter=filter_out_table_with_counter,
                                        filter_out_mv=filter_out_mv, filter_empty_tables=filter_empty_tables,
                                        filter_out_system=True, filter_out_cdc_log_tables=True, filter_by_keyspace=filter_by_keyspace,
-                                       filter_func=filter_func)
+                                       filter_func=filter_func, entity_type=entity_type)
 
-    def get_any_ks_cf_list(self, db_node,  # pylint: disable=too-many-arguments,too-many-statements
-                           filter_out_table_with_counter=False, filter_out_mv=False, filter_empty_tables=True,
-                           filter_out_system=False, filter_out_cdc_log_tables=False,
-                           filter_by_keyspace: list = None, filter_func: Callable[..., bool] = None) -> List[str]:
-        regular_column_names = ["keyspace_name", "table_name"]
-        materialized_view_column_names = ["keyspace_name", "view_name"]
+    def get_any_ks_cf_list(self, db_node,
+                           entity_type: str = "column",
+                           filter_out_table_with_counter=False,
+                           filter_out_mv=False,
+                           filter_empty_tables=True,
+                           filter_out_system=False,
+                           filter_out_cdc_log_tables=False,
+                           filter_by_keyspace: list = None,
+                           filter_func: Callable[[Any], bool] = None
+                           ) -> List[str]:
+        # regular_column_names = ["keyspace_name", "table_name"]
+        # materialized_view_column_names = ["keyspace_name", "view_name"]
         regular_table_names, materialized_view_table_names = set(), set()
         where_clause = ""
-
+        InfoEvent('55555555555555555555555555555555555555555').publish()
         if filter_by_keyspace:
             where_clause = ", ".join([f"'{ks}'" for ks in filter_by_keyspace])
             where_clause = f" WHERE keyspace_name in ({where_clause})"
 
         def execute_cmd(cql_session, entity_type):
             result = set()
-            is_column_type = entity_type == "column"
-            column_names = regular_column_names
-            if is_column_type:
-                cmd = f"SELECT {column_names[0]}, {column_names[1]}, type FROM system_schema.columns{where_clause}"
+            if entity_type == "column":
+                columns_to_fetch = ["keyspace_name", "table_name", "type"]
+                column_names = ["keyspace_name", "table_name"]
+            elif entity_type == "table":
+                columns_to_fetch = ["keyspace_name", "table_name"]
+                column_names = ["keyspace_name", "table_name"]
             elif entity_type == "view":
-                column_names = materialized_view_column_names
-                cmd = f"SELECT {column_names[0]}, {column_names[1]} FROM system_schema.views{where_clause}"
+                columns_to_fetch = ["keyspace_name", "view_name"]
+                column_names = ["keyspace_name", "view_name"]
             else:
                 raise ValueError(f"The following value '{entity_type}' not supported")
+
+            cmd = f"SELECT {', '.join(columns_to_fetch)} FROM system_schema.{entity_type}s{where_clause}"
 
             cql_session.default_fetch_size = 1000
             cql_session.default_timeout = 60.0 * 5
@@ -3696,26 +3707,32 @@ class BaseCluster:  # pylint: disable=too-many-instance-attributes,too-many-publ
             execute_result = cql_session.execute_async(cmd)
             fetcher = PageFetcher(execute_result).request_all(timeout=120)
             current_rows = fetcher.all_data()
+            InfoEvent('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! %s' %cmd).publish()
 
             for row in current_rows:
-                table_name = f"{getattr(row, column_names[0])}.{getattr(row, column_names[1])}"
+                keyspace_name = getattr(row, column_names[0])
+                table_name_attr = column_names[1]
+                table_name = getattr(row, table_name_attr)
 
-                if filter_out_system and is_system_keyspace(getattr(row, column_names[0])):
+                full_table_name = f"{keyspace_name}.{table_name}"
+
+                if filter_out_system and is_system_keyspace(keyspace_name):
                     continue
 
-                if is_column_type and (filter_out_table_with_counter and "counter" in row.type):
-                    continue
+                if entity_type == "column":
+                    if filter_out_table_with_counter and "counter" in getattr(row, 'type', ''):
+                        continue
 
-                if filter_out_cdc_log_tables and getattr(row, column_names[1]).endswith(cdc.options.CDC_LOGTABLE_SUFFIX):
+                if filter_out_cdc_log_tables and table_name.endswith(cdc.options.CDC_LOGTABLE_SUFFIX):
                     continue
 
                 if filter_func is not None:
-                    if filter_func(keyspace_name=getattr(row, column_names[0]), node=db_node, table_name=getattr(row, column_names[1])):
+                    if filter_func(keyspace_name=keyspace_name, node=db_node, table_name=table_name):
                         continue
 
-                result.add(table_name)
+                result.add(full_table_name)
 
-            if is_column_type and filter_empty_tables:
+            if entity_type == "column" and filter_empty_tables:
                 for i, table_name in enumerate(result.copy()):
                     has_data = False
                     try:
@@ -3736,16 +3753,28 @@ class BaseCluster:  # pylint: disable=too-many-instance-attributes,too-many-publ
                 self.get_keyspace_info.cache_clear()  # pylint: disable=no-member
             return result
 
+        InfoEvent('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!BEFORE').publish()
         with self.cql_connection_patient(db_node, connect_timeout=600) as session:
-            regular_table_names = execute_cmd(cql_session=session, entity_type="column")
-            if regular_table_names and filter_out_mv:
-                materialized_view_table_names = execute_cmd(cql_session=session, entity_type="view")
+            if entity_type == "column":
+                InfoEvent('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! COLUMN').publish()
+                regular_table_names = execute_cmd(session, entity_type)
+                if regular_table_names and filter_out_mv:
+                    materialized_view_table_names = execute_cmd(session, "view")
+            elif entity_type == "table":
+                InfoEvent('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! TABLE').publish()
+                regular_table_names = execute_cmd(session, entity_type)
+                if regular_table_names and filter_out_mv:
+                    materialized_view_table_names = execute_cmd(session, "view")
+            else:
+                raise ValueError(f"Unsupported entity_type: {entity_type}")
+
         if not regular_table_names:
             return []
 
         ks_cf_list = list(regular_table_names - materialized_view_table_names)
         ks_cf_list = ['.'.join([cql_quote_if_needed(v) for v in ks_cf.split('.', maxsplit=1)]) for ks_cf in ks_cf_list]
         return ks_cf_list
+
 
     def is_table_has_data(self, session, table_name: str) -> (bool, Optional[Exception]):
         """
@@ -3791,7 +3820,7 @@ class BaseCluster:  # pylint: disable=too-many-instance-attributes,too-many-publ
                 "dttl": 100,
                 }
         """
-        all_ks_cf = self.get_any_ks_cf_list(db_node, filter_out_system=True, filter_out_mv=True)
+        all_ks_cf = self.get_any_ks_cf_list(db_node, filter_out_system=True, filter_out_mv=True, entity_type='table')
         self.log.debug("Found user's tables: %s", all_ks_cf)
         twcs_tables_list = []
         twcs_query_search = "SELECT default_time_to_live as dttl, gc_grace_seconds as gc, compaction from system_schema.tables\
