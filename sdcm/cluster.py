@@ -3678,6 +3678,7 @@ class BaseCluster:  # pylint: disable=too-many-instance-attributes,too-many-publ
                            ) -> List[str]:
         # regular_column_names = ["keyspace_name", "table_name"]
         # materialized_view_column_names = ["keyspace_name", "view_name"]
+        entity_type = entity_type or 'column'
         regular_table_names, materialized_view_table_names = set(), set()
         where_clause = ""
         InfoEvent('55555555555555555555555555555555555555555').publish()
