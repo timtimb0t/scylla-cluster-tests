@@ -2774,6 +2774,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         """
         self.use_nemesis_seed()
         InfoEvent('2222222222222222222222222222222222222222222222222').publish()
+
         def set_new_twcs_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
             """ Recommended number of sstables for twcs is 20 - 30
                 if number of sstables more than 32, sstables are picked up
@@ -2793,29 +2794,47 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                      "dttl": 86400}
 
             """
-            # It is allowed that compaction strategy has only "class" defined, and "compaction_window_size" and "compaction_window_unit"
-            # are not defined.
-            current_unit = settings["compaction"].get("compaction_window_unit") or "DAYS"  # default value
-            current_size = int(settings["compaction"].get("compaction_window_size") or 1)  # default value
-            multiplier = 3600 if current_unit in ["DAYS", "HOURS"] else 60
+            # It is allowed that compaction strategy has only "class" defined, and "compaction_window_size" and
+            # "compaction_window_unit" are not defined.
+            # Default values and unit conversion
+            current_unit = settings["compaction"].get("compaction_window_unit") or "DAYS"
+            current_size = int(settings["compaction"].get("compaction_window_size") or 1)
+            unit_seconds = {'MINUTES': 60, 'HOURS': 3600, 'DAYS': 86400}
             expected_sstable_number = 35
+            twcs_max_window_count = 50  # Default maximum number of windows
 
-            if current_unit == "DAYS":
-                current_size = current_size + 1
-            elif current_unit == "HOURS":
-                if (current_size // 24) > 2:
-                    current_unit = "DAYS"
-                    current_size = 3
+            # Calculate initial compaction window size in seconds
+            compaction_window_size_seconds = current_size * unit_seconds[current_unit]
+            TTL = current_size * unit_seconds[current_unit] * expected_sstable_number  # Total Time to Live
+            number_of_windows = TTL / compaction_window_size_seconds  # Should equal expected_sstable_number initially
+
+            # Adjust compaction window size and unit to meet the twcs_max_window_count constraint
+            while number_of_windows > twcs_max_window_count:
+                # Increase compaction window size or change unit
+                if current_unit == "MINUTES":
+                    if current_size < 60:
+                        current_size += 5  # Increase size by 5 minutes
+                    else:
+                        current_unit = "HOURS"
+                        current_size = 1
+                elif current_unit == "HOURS":
+                    if current_size < 24:
+                        current_size += 1  # Increase size by 1 hour
+                    else:
+                        current_unit = "DAYS"
+                        current_size = 1
+                elif current_unit == "DAYS":
+                    current_size += 1  # Increase size by 1 day
                 else:
-                    current_size += 10
-            elif (current_size // 60) > 10:
-                current_unit = "HOURS"
-                current_size = 11
-            else:
-                current_size += 35
+                    raise ValueError("Cannot adjust compaction window size to meet constraints.")
 
-            settings["gc"] = current_size * multiplier * expected_sstable_number // 2
-            settings["dttl"] = current_size * multiplier * expected_sstable_number
+                # Recalculate compaction window size in seconds and number of windows
+                compaction_window_size_seconds = current_size * unit_seconds[current_unit]
+                number_of_windows = TTL / compaction_window_size_seconds
+
+            # Update settings with new values
+            settings["gc"] = compaction_window_size_seconds * expected_sstable_number // 2
+            settings["dttl"] = TTL
             settings["compaction"]["compaction_window_unit"] = current_unit
             settings["compaction"]["compaction_window_size"] = current_size
 
@@ -2845,27 +2864,27 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                                     val=ks_cs_settings["gc"], keyspace_table=ks_cs_settings["name"])
         InfoEvent('TTL MOD 3').publish()
 
-        def chk_tbl(msg=None):
-            verify4 = """SELECT * 
-                        FROM system_schema.tables 
-                        WHERE keyspace_name = 'keyspace1' AND table_name = 'standard1';
-                        """
-            with self.cluster.cql_connection_patient(self.target_node) as session:
-                list_bbb = [verify4]
-                for cmd in list_bbb:
-                    result = session.execute(cmd)
-
-                    for row in result:
-                        if hasattr(row, 'compaction'):
-                            compaction_info = dict(row.compaction)  # Convert OrderedMapSerializedKey to dictionary
-                            if 'class' in compaction_info and compaction_info[
-                                'class'] == 'TimeWindowCompactionStrategy':
-                                InfoEvent(
-                                    'TimeWindowCompactionStrategy info 0000000000000000000000000000000000000000000000: %s' % compaction_info).publish()
-                        else:
-                            InfoEvent('88888888888888888888888888888888888 Row data: %s' % row).publish()
-
-        chk_tbl()
+        # def chk_tbl(msg=None):
+        #     verify4 = """SELECT *
+        #                 FROM system_schema.tables
+        #                 WHERE keyspace_name = 'keyspace1' AND table_name = 'standard1';
+        #                 """
+        #     with self.cluster.cql_connection_patient(self.target_node) as session:
+        #         list_bbb = [verify4]
+        #         for cmd in list_bbb:
+        #             result = session.execute(cmd)
+        #
+        #             for row in result:
+        #                 if hasattr(row, 'compaction'):
+        #                     compaction_info = dict(row.compaction)  # Convert OrderedMapSerializedKey to dictionary
+        #                     if 'class' in compaction_info and compaction_info[
+        #                         'class'] == 'TimeWindowCompactionStrategy':
+        #                         InfoEvent(
+        #                             'TimeWindowCompactionStrategy info 0000000000000000000000000000000000000000000000: %s' % compaction_info).publish()
+        #                 else:
+        #                     InfoEvent('88888888888888888888888888888888888 Row data: %s' % row).publish()
+        #
+        # chk_tbl()
         self.cluster.wait_for_schema_agreement()
         # wait timeout  equal 2% of test duration for generating sstables with timewindow settings
         sleep_timeout = int(0.02 * self.tester.params["test_duration"])
