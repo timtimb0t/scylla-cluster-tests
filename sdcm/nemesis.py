@@ -2634,18 +2634,18 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             }
         """
         strategies = [
-            {
-                'class': 'SizeTieredCompactionStrategy',
-                'bucket_high': 1.5,
-                'bucket_low': 0.5,
-                'min_sstable_size': 50,
-                'min_threshold': 4,
-                'max_threshold': 32,
-            },
-            {
-                'class': 'LeveledCompactionStrategy',
-                'sstable_size_in_mb': 160,
-            },
+            # {
+            #     'class': 'SizeTieredCompactionStrategy',
+            #     'bucket_high': 1.5,
+            #     'bucket_low': 0.5,
+            #     'min_sstable_size': 50,
+            #     'min_threshold': 4,
+            #     'max_threshold': 32,
+            # },
+            # {
+            #     'class': 'LeveledCompactionStrategy',
+            #     'sstable_size_in_mb': 160,
+            # },
             {
                 'class': 'TimeWindowCompactionStrategy',
                 'compaction_window_unit': 'DAYS',
@@ -2656,6 +2656,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             },
         ]
         prop_val = random.choice(strategies)
+        InfoEvent('!!!!!!!!!!!!!!!!!!!!!!!!! modify_table_compaction invoking !!!!!!!!!!!!!!!!!!!!!!!!!').publish()
         self._modify_table_property(name="compaction", val=str(prop_val))
 
     def modify_table_compression(self):
@@ -2820,6 +2821,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             return settings
 
         all_ks_cs_with_twcs = self.cluster.get_all_tables_with_twcs(self.target_node)
+        InfoEvent('88888888888888888888888888888888888 Row data: %s' % all_ks_cs_with_twcs).publish()
         self.log.debug("All tables with TWCS %s", all_ks_cs_with_twcs)
 
         if not all_ks_cs_with_twcs:
@@ -2884,10 +2886,10 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         self.toggle_table_gc_mode()
 
     def disrupt_modify_table(self):
-        # randomly select and run one of disrupt_modify_table* methods
-        disrupt_func_name = random.choice([dm for dm in dir(self) if dm.startswith("modify_table")])
-        disrupt_func = getattr(self, disrupt_func_name)
-        disrupt_func()
+        self.modify_table_compaction()
+        #chk_tbl(msg=True)
+        self.modify_table_default_time_to_live()
+        self.modify_table_twcs_window_size()
 
     def disrupt_mgmt_backup_specific_keyspaces(self):
         self._mgmt_backup(backup_specific_tables=True)
