@@ -2937,8 +2937,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
 
         self.modify_table_compaction()
         #chk_tbl(msg=True)
-        self.modify_table_twcs_window_size()
         self.modify_table_default_time_to_live()
+        self.modify_table_twcs_window_size()
+
 
     def disrupt_mgmt_backup_specific_keyspaces(self):
         self._mgmt_backup(backup_specific_tables=True)
