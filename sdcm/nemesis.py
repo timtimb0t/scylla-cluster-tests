@@ -2704,8 +2704,75 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         #    But table with counters doesn't support this
 
         # max allowed TTL - 49 days (4300000) (to be compatible with default TWCS settings)
-        self._modify_table_property(name="default_time_to_live", val=random.randint(864000, 4300000),
-                                    filter_out_table_with_counter=True)
+
+        self.use_nemesis_seed()
+
+        ks_cfs = self.cluster.get_non_system_ks_cf_list(
+            db_node=self.target_node, filter_out_table_with_counter=True,
+            filter_out_mv=True)  # not allowed to modify MV
+
+        keyspace_table = random.choice(ks_cfs) if ks_cfs else ks_cfs
+        InfoEvent('111111111111111111111111111111111111 keyspace_table data: %s' % keyspace_table).publish()
+        keyspace, table = keyspace_table.split('.')
+        query = f"SELECT compaction FROM system_schema.tables WHERE keyspace_name = '{keyspace}' AND table_name = '{table}';"
+        with self.cluster.cql_connection_patient(self.target_node) as session:
+            result = session.execute(query)
+            InfoEvent('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! result data: %s' % result).publish()
+
+        compaction_options = result.compaction  # Should be a dictionary
+
+        # Check if compaction class is TimeWindowCompactionStrategy
+        compaction_class = compaction_options.get('class')
+        if 'TimeWindowCompactionStrategy' not in compaction_class:
+            InfoEvent('2222222222222222222222222222222222222222222222' % compaction_class).publish()
+
+        # Get compaction_window_size and unit
+        compaction_window_size = int(compaction_options.get('compaction_window_size', '1'))
+        compaction_window_unit = compaction_options.get('compaction_window_unit', 'DAYS').upper()
+
+        # Convert compaction_window_size to seconds
+        unit_multipliers = {
+            'MINUTES': 60,
+            'HOURS': 3600,
+            'DAYS': 86400,
+            'WEEKS': 604800,
+        }
+        multiplier = unit_multipliers.get(compaction_window_unit, 86400)
+        compaction_window_size_seconds = compaction_window_size * multiplier
+
+        # Get twcs_max_window_count, default is 50
+        twcs_max_window_count = int(compaction_options.get('twcs_max_window_count', '50'))
+
+        # Calculate maximum allowed default_time_to_live
+        max_ttl = twcs_max_window_count * compaction_window_size_seconds
+
+
+        # Define a minimum TTL value (e.g., 10 days)
+        min_ttl = 864000  # 10 days in seconds
+
+
+
+        # def chk_tbl(msg=None):
+        #     verify4 = """SELECT *
+        #                 FROM system_schema.tables
+        #                 WHERE keyspace_name = 'keyspace1' AND table_name = 'standard1';
+        #                 """
+        #     with self.cluster.cql_connection_patient(self.target_node) as session:
+        #         result = session.execute(verify4)
+        #
+        #         for row in result:
+        #             if hasattr(row, 'compaction'):
+        #                 compaction_info = dict(row.compaction)  # Convert OrderedMapSerializedKey to dictionary
+        #                 if 'class' in compaction_info and compaction_info[
+        #                     'class'] == 'TimeWindowCompactionStrategy':
+        #                     InfoEvent(
+        #                         'TimeWindowCompactionStrategy info 0000000000000000000000000000000000000000000000: %s' % compaction_info).publish()
+        #             else:
+        #                 InfoEvent('88888888888888888888888888888888888 Row data: %s' % row).publish()
+
+
+        self._modify_table_property(name="default_time_to_live", val=random.randint(min_ttl, max_ttl),
+                                    filter_out_table_with_counter=True, keyspace_table=keyspace_table)
 
     def modify_table_max_index_interval(self):
         """
