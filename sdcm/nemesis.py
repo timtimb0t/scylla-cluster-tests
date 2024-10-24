@@ -2697,6 +2697,8 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             The value of this property is a number of seconds. If it is set, Cassandra applies a
             default TTL marker to each column in the table, set to this value. When the table TTL
             is exceeded, Cassandra tombstones the table.
+            This nemises selects random table, check if it has TimeWindowCompactionStrategy applied
+            and calculate possible default time to live and sets default values if table has no such strategy.
             default: default_time_to_live = 0
         """
         # Select table without columns with "counter" type for this nemesis - issue #1037:
@@ -2705,72 +2707,72 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
 
         # max allowed TTL - 49 days (4300000) (to be compatible with default TWCS settings)
 
-        def do_default_time_to_live_calculation():
-            self.use_nemesis_seed()
+        default_min_ttl = 864000  # 10 days in seconds
+        default_max_ttl = 4300000
 
-            ks_cfs = self.cluster.get_non_system_ks_cf_list(
-                db_node=self.target_node, filter_out_table_with_counter=True,
-                filter_out_mv=True)
+        ks_cfs = self.cluster.get_non_system_ks_cf_list(
+            db_node=self.target_node, filter_out_table_with_counter=True,
+            filter_out_mv=True)
 
-            keyspace_table_ = random.choice(ks_cfs) if ks_cfs else ks_cfs
-            keyspace, table = keyspace_table.split('.')
+        keyspace_table = random.choice(ks_cfs) if ks_cfs else ks_cfs
+
+        def get_compaction_info_if_twcs_table(table):
+            keyspace, table = table.split('.')
             query = f"SELECT compaction FROM system_schema.tables WHERE keyspace_name = '{keyspace}' AND table_name = '{table}';"
 
-            InfoEvent(f'Getting data from Scylla node: {self.target_node}, table: {keyspace_table_}').publish()
+            LOGGER.debug(f'Getting data from Scylla node: {self.target_node}, table: {table}')
             with self.cluster.cql_connection_patient(self.target_node) as session:
                 result = session.execute(query)
 
             for row in result:
                 if hasattr(row, 'compaction'):
-                    compaction_info = dict(row.compaction)
-                    if 'class' in compaction_info and compaction_info['class'] == 'TimeWindowCompactionStrategy':
+                    compaction_info_ = dict(row.compaction)
+                    if 'class' in compaction_info_ and compaction_info_['class'] == 'TimeWindowCompactionStrategy':
+                        return compaction_info_
+                    else:
+                        return None
 
-                        # Get compaction_window_size and unit
-                        compaction_window_size = int(compaction_info.get('compaction_window_size', '1'))
-                        compaction_window_unit = compaction_info.get('compaction_window_unit', 'DAYS').upper()
+        def do_default_time_to_live_calculation(compaction_info_):
+            # Get compaction_window_size and unit
+            compaction_window_size = int(compaction_info_.get('compaction_window_size', '1'))
+            compaction_window_unit = compaction_info_.get('compaction_window_unit', 'DAYS').upper()
+            LOGGER.debug(f'Compaction window size: {compaction_window_size}, Unit: {compaction_window_unit}')
 
-                        InfoEvent(
-                            f'Compaction window size: {compaction_window_size}, Unit: {compaction_window_unit}').publish()
+            # Convert compaction_window_size to seconds
+            unit_multipliers = {
+                'MINUTES': 60,
+                'HOURS': 3600,
+                'DAYS': 86400,
+                'WEEKS': 604800,
+            }
+            multiplier = unit_multipliers.get(compaction_window_unit, 86400)
+            compaction_window_size_seconds = compaction_window_size * multiplier
 
-                        # Convert compaction_window_size to seconds
-                        unit_multipliers = {
-                            'MINUTES': 60,
-                            'HOURS': 3600,
-                            'DAYS': 86400,
-                            'WEEKS': 604800,
-                        }
-                        multiplier = unit_multipliers.get(compaction_window_unit, 86400)
-                        compaction_window_size_seconds = compaction_window_size * multiplier
+            # Get twcs_max_window_count, default is 50
+            twcs_max_window_count = int(compaction_info_.get('twcs_max_window_count', '50'))
 
-                        # Get twcs_max_window_count, default is 50
-                        twcs_max_window_count = int(compaction_info.get('twcs_max_window_count', '50'))
+            # Calculate maximum allowed default_time_to_live
+            calculated_max_ttl = twcs_max_window_count * compaction_window_size_seconds
 
-                        # Calculate maximum allowed default_time_to_live
-                        max_ttl_ = twcs_max_window_count * compaction_window_size_seconds
+            LOGGER.debug(f'Maximum allowed default_time_to_live: {calculated_max_ttl} seconds')
+            if calculated_max_ttl <= 0:
+                # check if ERROR event happened
+                raise Exception(
+                    "Invalid TWCS settings: compaction window size and max window count must be positive.")
 
-                        InfoEvent(
-                            f'Maximum allowed default_time_to_live: {max_ttl_} seconds').publish()
+            # Check if max_ttl is less than min_ttl
+            if calculated_max_ttl < default_min_ttl:
+                # if calculated max_ttl < default_min_ttl, nemises will set max calc_ttl
+                return calculated_max_ttl, calculated_max_ttl
+            else:
+                return default_min_ttl, calculated_max_ttl
 
-                        # Define a minimum TTL value (e.g., 10 days)
-                        min_ttl_ = 864000  # 10 days in seconds
-                        InfoEvent(f'Minimum TTL value: {min_ttl} seconds').publish()
-
-                        if max_ttl_ <= 0:
-                            raise Exception(
-                                "Invalid TWCS settings: compaction window size and max window count must be positive.")
-
-                        # Check if max_ttl is less than min_ttl
-                        if max_ttl_ < min_ttl_:
-                            return None , max_ttl_, keyspace_table_
-
-                        return min_ttl_, max_ttl_, keyspace_table_
-
-        #(864000, 4300000)
-        min_ttl, max_ttl, keyspace_table = do_default_time_to_live_calculation()
-        if min_ttl is None:
-            value = max_ttl
-        else:
+        compaction_info = get_compaction_info_if_twcs_table(keyspace_table)
+        if compaction_info:
+            min_ttl, max_ttl = do_default_time_to_live_calculation(compaction_info)
             value = random.randint(min_ttl, max_ttl)
+        else:
+            value = random.randint(default_min_ttl, default_max_ttl)
 
         InfoEvent(f'New default time to live to be set: {value}, for table: {keyspace_table}').publish()
         self._modify_table_property(name="default_time_to_live", val=value,
