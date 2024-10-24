@@ -2761,13 +2761,16 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
 
                         # Check if max_ttl is less than min_ttl
                         if max_ttl_ < min_ttl_:
-                            return max_ttl_
+                            return None , max_ttl_, keyspace_table_
 
                         return min_ttl_, max_ttl_, keyspace_table_
 
         #(864000, 4300000)
         min_ttl, max_ttl, keyspace_table = do_default_time_to_live_calculation()
-        value = random.randint(min_ttl, max_ttl)
+        if min_ttl is None:
+            value = max_ttl
+        else:
+            value = random.randint(min_ttl, max_ttl)
 
         InfoEvent(f'New default time to live to be set: {value}, for table: {keyspace_table}').publish()
         self._modify_table_property(name="default_time_to_live", val=value,
