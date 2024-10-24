@@ -2705,26 +2705,25 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
 
         # max allowed TTL - 49 days (4300000) (to be compatible with default TWCS settings)
 
-        self.use_nemesis_seed()
+        def do_default_time_to_live_calculation():
+            self.use_nemesis_seed()
 
-        ks_cfs = self.cluster.get_non_system_ks_cf_list(
-            db_node=self.target_node, filter_out_table_with_counter=True,
-            filter_out_mv=True)  # not allowed to modify MV
+            ks_cfs = self.cluster.get_non_system_ks_cf_list(
+                db_node=self.target_node, filter_out_table_with_counter=True,
+                filter_out_mv=True)
 
-        keyspace_table = random.choice(ks_cfs) if ks_cfs else ks_cfs
-        InfoEvent('111111111111111111111111111111111111 keyspace_table data: %s' % keyspace_table).publish()
-        keyspace, table = keyspace_table.split('.')
-        query = f"SELECT compaction FROM system_schema.tables WHERE keyspace_name = '{keyspace}' AND table_name = '{table}';"
-        with self.cluster.cql_connection_patient(self.target_node) as session:
-            result = session.execute(query)
-            InfoEvent('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! result data: %s' % result.__dict__).publish()
+            keyspace_table_ = random.choice(ks_cfs) if ks_cfs else ks_cfs
+            keyspace, table = keyspace_table.split('.')
+            query = f"SELECT compaction FROM system_schema.tables WHERE keyspace_name = '{keyspace}' AND table_name = '{table}';"
 
-        def check_result(result):
+            InfoEvent(f'Getting data from Scylla node: {self.target_node}, table: {keyspace_table_}').publish()
+            with self.cluster.cql_connection_patient(self.target_node) as session:
+                result = session.execute(query)
+
             for row in result:
                 if hasattr(row, 'compaction'):
                     compaction_info = dict(row.compaction)
                     if 'class' in compaction_info and compaction_info['class'] == 'TimeWindowCompactionStrategy':
-                        InfoEvent('TimeWindowCompactionStrategy info: %s' % compaction_info).publish()
 
                         # Get compaction_window_size and unit
                         compaction_window_size = int(compaction_info.get('compaction_window_size', '1'))
@@ -2747,37 +2746,31 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                         twcs_max_window_count = int(compaction_info.get('twcs_max_window_count', '50'))
 
                         # Calculate maximum allowed default_time_to_live
-                        max_ttl = twcs_max_window_count * compaction_window_size_seconds
+                        max_ttl_ = twcs_max_window_count * compaction_window_size_seconds
 
                         InfoEvent(
-                            f'Maximum allowed default_time_to_live: {max_ttl} seconds').publish()
+                            f'Maximum allowed default_time_to_live: {max_ttl_} seconds').publish()
 
                         # Define a minimum TTL value (e.g., 10 days)
-                        min_ttl = 864000  # 10 days in seconds
+                        min_ttl_ = 864000  # 10 days in seconds
                         InfoEvent(f'Minimum TTL value: {min_ttl} seconds').publish()
-                        return min_ttl, max_ttl
 
+                        if max_ttl_ <= 0:
+                            raise Exception(
+                                "Invalid TWCS settings: compaction window size and max window count must be positive.")
 
-        # def chk_tbl(msg=None):
-        #     verify4 = """SELECT *
-        #                 FROM system_schema.tables
-        #                 WHERE keyspace_name = 'keyspace1' AND table_name = 'standard1';
-        #                 """
-        #     with self.cluster.cql_connection_patient(self.target_node) as session:
-        #         result = session.execute(verify4)
-        #
-        #         for row in result:
-        #             if hasattr(row, 'compaction'):
-        #                 compaction_info = dict(row.compaction)  # Convert OrderedMapSerializedKey to dictionary
-        #                 if 'class' in compaction_info and compaction_info[
-        #                     'class'] == 'TimeWindowCompactionStrategy':
-        #                     InfoEvent(
-        #                         'TimeWindowCompactionStrategy info 0000000000000000000000000000000000000000000000: %s' % compaction_info).publish()
-        #             else:
-        #                 InfoEvent('88888888888888888888888888888888888 Row data: %s' % row).publish()
+                        # Check if max_ttl is less than min_ttl
+                        if max_ttl_ < min_ttl_:
+                            return max_ttl_
 
-        min_ttl, max_ttl = check_result(result=result)
-        self._modify_table_property(name="default_time_to_live", val=random.randint(min_ttl, max_ttl),
+                        return min_ttl_, max_ttl_, keyspace_table_
+
+        #(864000, 4300000)
+        min_ttl, max_ttl, keyspace_table = do_default_time_to_live_calculation()
+        value = random.randint(min_ttl, max_ttl)
+
+        InfoEvent(f'New default time to live to be set: {value}, for table: {keyspace_table}').publish()
+        self._modify_table_property(name="default_time_to_live", val=value,
                                     filter_out_table_with_counter=True, keyspace_table=keyspace_table)
 
     def modify_table_max_index_interval(self):
