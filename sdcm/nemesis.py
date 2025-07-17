@@ -6783,3 +6783,271 @@ class IsolateNodeWithIptableRuleNemesis(Nemesis):
 
     def disrupt(self):
         self.disrupt_refuse_connection_with_block_scylla_ports_on_banned_node()
+
+
+
+
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+class LWTLinearizabilityNemesis(Nemesis):
+    """
+    Nemesis that tests Light Weight Transactions (LWT) linearizability using
+    the Jepsen list-append workload pattern.
+
+    This nemesis performs concurrent conditional updates:
+    UPDATE my_table SET v1 = v1 + [thread_number.thread_index] WHERE key = 0 IF EXISTS
+
+    After all threads complete, it validates that:
+    1. Each thread_number.thread_index that should have appeared is actually present
+    2. No duplications exist in the final list
+    3. The order represents a valid linearization
+    """
+
+
+    disruptive = False
+    kubernetes = True
+    limited = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lwt_keyspace = "lwt_test"
+        self.lwt_table = "linearizability_test"
+        self.test_key = 0
+        self.num_threads = 10
+        self.operations_per_thread = 20
+
+    def _create_lwt_schema(self, session):
+        """Create the keyspace and table for LWT testing"""
+        try:
+            # Create keyspace
+            session.execute(f"""
+                CREATE KEYSPACE IF NOT EXISTS {self.lwt_keyspace}
+                WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': 3}}
+            """)
+
+            # Create table with list column for append operations
+            session.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.lwt_keyspace}.{self.lwt_table} (
+                    key int PRIMARY KEY,
+                    v1 list<text>,
+                    created_at timestamp
+                )
+            """)
+
+            # Initialize the test row
+            session.execute(f"""
+                INSERT INTO {self.lwt_keyspace}.{self.lwt_table} (key, v1, created_at)
+                VALUES ({self.test_key}, [], toTimestamp(now()))
+                IF NOT EXISTS
+            """)
+
+            self.log.info("LWT test schema created successfully")
+
+        except Exception as e:
+            self.log.error(f"Failed to create LWT schema: {e}")
+            raise
+
+    def _lwt_append_worker(self, thread_id, operations_count, node):
+        """Worker function that performs LWT append operations"""
+        results = []
+
+        try:
+            with self.cluster.cql_connection_patient(node, keyspace=self.lwt_keyspace) as session:
+                for op_id in range(operations_count):
+                    # Create unique identifier for this operation
+                    operation_value = f"t{thread_id}_{op_id}"
+
+                    # Perform conditional update with retry logic
+                    max_retries = 10
+                    for attempt in range(max_retries):
+                        try:
+                            # Read current value
+                            result = session.execute(f"""
+                                SELECT v1 FROM {self.lwt_table} WHERE key = {self.test_key}
+                            """)
+                            current_list = result.one().v1 if result.one() else []
+
+                            # Append our value to the list
+                            new_list = current_list + [operation_value]
+
+                            # Conditional update
+                            lwt_result = session.execute(f"""
+                                UPDATE {self.lwt_keyspace}.{self.lwt_table}
+                                SET v1 = %s
+                                WHERE key = {self.test_key}
+                                IF EXISTS
+                            """, [new_list])
+
+                            if lwt_result.one()[0]:  # [applied] column
+                                results.append({
+                                    'thread_id': thread_id,
+                                    'op_id': op_id,
+                                    'value': operation_value,
+                                    'success': True,
+                                    'attempt': attempt + 1
+                                })
+                                break
+                            else:
+                                # CAS failed, retry
+                                time.sleep(0.001 * (attempt + 1))  # Exponential backoff
+
+                        except Exception as e:
+                            self.log.warning(f"LWT operation failed for thread {thread_id}, op {op_id}, attempt {attempt + 1}: {e}")
+                            if attempt == max_retries - 1:
+                                results.append({
+                                    'thread_id': thread_id,
+                                    'op_id': op_id,
+                                    'value': operation_value,
+                                    'success': False,
+                                    'error': str(e)
+                                })
+                            else:
+                                time.sleep(0.01 * (attempt + 1))
+
+        except Exception as e:
+            self.log.error(f"Worker thread {thread_id} failed: {e}")
+
+        return results
+
+    def _validate_linearizability(self, session, expected_operations):
+        """Validate that the final state represents a valid linearization"""
+        try:
+            # Read final state
+            result = session.execute(f"""
+                SELECT v1 FROM {self.lwt_keyspace}.{self.lwt_table} WHERE key = {self.test_key}
+            """)
+
+            final_list = result.one().v1 if result.one() else []
+
+            self.log.info(f"Final list contains {len(final_list)} elements")
+            self.log.debug(f"Final list: {final_list}")
+
+            # Check for duplicates
+            duplicates = []
+            seen = set()
+            for item in final_list:
+                if item in seen:
+                    duplicates.append(item)
+                else:
+                    seen.add(item)
+
+            if duplicates:
+                self.log.error(f"Duplicates found in final list: {duplicates}")
+                return False
+
+            # Check that all successful operations are present
+            expected_values = {op['value'] for op in expected_operations if op['success']}
+            actual_values = set(final_list)
+
+            missing = expected_values - actual_values
+            unexpected = actual_values - expected_values
+
+            if missing:
+                self.log.error(f"Missing expected values: {missing}")
+                return False
+
+            if unexpected:
+                self.log.error(f"Unexpected values found: {unexpected}")
+                return False
+
+            # Validate order represents a valid linearization
+            # Each thread's operations should appear in order
+            thread_positions = defaultdict(list)
+            for i, value in enumerate(final_list):
+                if '_' in value and value.startswith('t'):
+                    try:
+                        thread_id, op_id = value[1:].split('_')
+                        thread_positions[int(thread_id)].append((int(op_id), i))
+                    except ValueError:
+                        continue
+
+            for thread_id, positions in thread_positions.items():
+                positions.sort()  # Sort by op_id
+                for i in range(1, len(positions)):
+                    if positions[i][1] <= positions[i-1][1]:  # Check global order
+                        self.log.error(f"Thread {thread_id} operations not in linearizable order")
+                        return False
+
+            self.log.info("Linearizability validation passed")
+            return True
+
+        except Exception as e:
+            self.log.error(f"Failed to validate linearizability: {e}")
+            return False
+
+    @target_all_nodes
+    def disrupt_lwt_linearizability_test(self):
+        """Execute the LWT linearizability test"""
+        with self.action_log_scope("LWT Linearizability Test", target=self.target_node.name):
+            try:
+                # Setup test schema
+                with self.cluster.cql_connection_patient(self.target_node) as session:
+                    self._create_lwt_schema(session)
+
+                # Execute concurrent LWT operations
+                self.log.info(f"Starting LWT test with {self.num_threads} threads, {self.operations_per_thread} ops each")
+
+                all_results = []
+                start_time = time.time()
+
+                # Use a subset of nodes for the test
+                test_nodes = random.sample(self.cluster.nodes, min(3, len(self.cluster.nodes)))
+
+                with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
+                    # Submit all worker tasks
+                    futures = []
+                    for thread_id in range(self.num_threads):
+                        # Distribute threads across different nodes
+                        node = test_nodes[thread_id % len(test_nodes)]
+                        future = executor.submit(
+                            self._lwt_append_worker,
+                            thread_id,
+                            self.operations_per_thread,
+                            node
+                        )
+                        futures.append(future)
+
+                    # Collect results
+                    for future in as_completed(futures):
+                        try:
+                            results = future.result(timeout=300)  # 5 min timeout per thread
+                            all_results.extend(results)
+                        except Exception as e:
+                            self.log.error(f"Thread execution failed: {e}")
+
+                execution_time = time.time() - start_time
+                self.log.info(f"LWT operations completed in {execution_time:.2f} seconds")
+
+                # Validate results
+                successful_ops = [r for r in all_results if r['success']]
+                failed_ops = [r for r in all_results if not r['success']]
+
+                self.log.info(f"Operations: {len(successful_ops)} successful, {len(failed_ops)} failed")
+
+                # Validate linearizability
+                with self.cluster.cql_connection_patient(self.target_node, keyspace=self.lwt_keyspace) as session:
+                    is_linearizable = self._validate_linearizability(session, all_results)
+
+                if not is_linearizable:
+                    raise NemesisSubTestFailure("LWT linearizability test failed - non-linearizable execution detected")
+
+                # Cleanup
+                with self.cluster.cql_connection_patient(self.target_node) as session:
+                    session.execute(f"DROP KEYSPACE IF EXISTS {self.lwt_keyspace}")
+
+                self.log.info("LWT linearizability test completed successfully")
+
+            except Exception as e:
+                self.log.error(f"LWT linearizability test failed: {e}")
+                raise
+
+    def disrupt(self):
+        """Main nemesis entry point"""
+        self.disrupt_lwt_linearizability_test()
+
+
+class LWTLinearizabilityMonkey(LWTLinearizabilityNemesis):
+    """Monkey that runs LWT linearizability tests"""
+
+    def disrupt(self):
+        self.disrupt_lwt_linearizability_test()
