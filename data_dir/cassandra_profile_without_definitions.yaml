@@ -1,26 +1,11 @@
+# This secondary profile is used only for the stress phase and does not contain any
+# schema or role definitions. The keyspace/table/index/user creation is done once
+# by the main profile during the prepare phase. Keeping this profile DDL-free avoids
+# repeatedly executing CREATE statements from every loader and allows us to run the
+# workload with regular (non-superuser) accounts while reusing the existing schema.
 ### DML ###
-
 keyspace: keyspace1
-
-keyspace_definition: |
-  CREATE KEYSPACE IF NOT EXISTS keyspace1 WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3}
-
 table: standard2
-
-table_definition: |
-  CREATE TABLE standard2 (
-      key blob,
-      c0 blob,
-      c1 blob,
-      c2 blob,
-      c3 blob,
-      c4 blob,
-      PRIMARY KEY (key)
-    )  WITH compaction = {'class': 'LeveledCompactionStrategy'};
-
-extra_definitions:
-  - CREATE INDEX IF NOT EXISTS sec_ind_c2 ON keyspace1.standard2 (c2)
-  - CREATE INDEX IF NOT EXISTS sec_ind_c3 ON keyspace1.standard2 (c3)
 
 
 ### Column Distribution Specifications ###
