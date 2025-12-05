@@ -2667,10 +2667,10 @@ class Nemesis(NemesisFlags):
         # Pick a random strategy and get its properties.
         prop_val = random.choice(strategies)()
 
-        if prop_val['class'] == 'TimeWindowCompactionStrategy':
-            # Max allowed TTL - 49 days (4300000) (to be compatible with default TWCS settings)
-            self._modify_table_property(name="default_time_to_live", val=str(4300000),
-                                        filter_out_table_with_counter=True)
+        # if prop_val['class'] == 'TimeWindowCompactionStrategy':
+        #     # Max allowed TTL - 49 days (4300000) (to be compatible with default TWCS settings)
+        #     self._modify_table_property(name="default_time_to_live", val=str(4300000),
+        #                                 filter_out_table_with_counter=True)
 
         self._modify_table_property(name="compaction", val=str(prop_val))
 
@@ -7108,3 +7108,16 @@ class KillMVBuildingCoordinator(Nemesis):
 
     def disrupt(self):
         self.disrupt_kill_mv_building_coordinator()
+
+class TestNemesis(Nemesis):
+
+    def disrupt(self):
+        self.set_target_node()
+        methods = [
+            self.modify_table_default_time_to_live,
+            self.modify_table_compaction,
+            self.modify_table_twcs_window_size,
+        ]
+        method = random.choice(methods)
+        method()
+
