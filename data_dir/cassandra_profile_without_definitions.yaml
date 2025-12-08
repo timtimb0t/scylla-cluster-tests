@@ -1,0 +1,49 @@
+# This secondary profile is used only for the stress phase and does not contain any
+# schema or role definitions. The keyspace/table/index/user creation is done once
+# by the main profile during the prepare phase. Keeping this profile DDL-free avoids
+# repeatedly executing CREATE statements from every loader and allows us to run the
+# workload with regular (non-superuser) accounts while reusing the existing schema.
+### DML ###
+keyspace: keyspace1
+table: standard2
+
+
+### Column Distribution Specifications ###
+columnspec:
+  - name: key
+    size: fixed(10)
+    population: uniform(1..10M)
+
+  - name: c0
+    size: fixed(1024)
+
+  - name: c1
+    size: fixed(1024)
+
+  - name: c2
+    size: fixed(1024)
+
+  - name: c3
+    size: fixed(1024)
+
+  - name: c4
+    size: fixed(1024)
+
+insert:
+  partitions: fixed(1)
+  select:    fixed(1)/1
+  batchtype: UNLOGGED
+
+queries:
+  insert:
+    cql: insert into keyspace1.standard2 (key, c0, c1, c2, c3, c4) values (?,?,?,?,?,?)
+    fields: samerow
+  read:
+    cql: select * from keyspace1.standard2 where key=?
+    fields: samerow
+  si_read1:
+    cql: select * from keyspace1.standard2 where c2 = ? LIMIT 1
+    fields: samerow
+  si_read2:
+    cql: select * from keyspace1.standard2 where c3 = ? LIMIT 1
+    fields: samerow
