@@ -98,6 +98,7 @@ from sdcm.remote.remote_file import remote_file, yaml_file_to_dict, dict_to_yaml
 from sdcm import wait, mgmt
 from sdcm.sct_config import SCTConfiguration
 from sdcm.sct_events.continuous_event import ContinuousEventsRegistry
+from sdcm.sct_events.group_common_events import ignore_raft_topology_cmd_failing
 from sdcm.sct_events.system import AwsKmsEvent
 from sdcm.snitch_configuration import SnitchConfig
 from sdcm.utils import properties
@@ -2904,19 +2905,30 @@ class BaseNode(AutoSshContainerMixin):
             self.wait_jmx_down(timeout=timeout)
 
     @log_run_info
-    def stop_scylla(self, verify_up=False, verify_down=True, timeout=300):
-        self.stop_scylla_server(verify_up=verify_up, verify_down=verify_down, timeout=timeout)
+    def stop_scylla(self, verify_up=False, verify_down=True, ignore_raft_topology_errors=False, timeout=300):
+        ignore_context = ignore_raft_topology_cmd_failing() if ignore_raft_topology_errors else contextlib.nullcontext()
+        with ignore_context:
+            self.stop_scylla_server(verify_up=verify_up, verify_down=verify_down, timeout=timeout)
         if verify_down:
             self.wait_jmx_down(timeout=timeout)
 
-    def restart_scylla_server(self, verify_up_before=False, verify_up_after=True, timeout=1800, verify_up_timeout=None):
+    def restart_scylla_server(
+        self,
+        verify_up_before=False,
+        verify_up_after=True,
+        timeout=1800,
+        ignore_raft_topology_errors=False,
+        verify_up_timeout=None,
+    ):
         verify_up_timeout = verify_up_timeout or self.verify_up_timeout
+        ignore_context = ignore_raft_topology_cmd_failing() if ignore_raft_topology_errors else contextlib.nullcontext()
         if verify_up_before:
             self.wait_db_up(timeout=verify_up_timeout)
         with adaptive_timeout(
             operation=Operations.RESTART_SCYLLA, node=self, timeout=timeout, stats_storage=AdaptiveTimeoutStore()
         ):
-            self.restart_service(service_name="scylla-server", timeout=timeout * 2)
+            with ignore_context:
+                self.restart_service(service_name="scylla-server", timeout=timeout * 2)
         if verify_up_after:
             self.wait_db_up(timeout=verify_up_timeout)
 
@@ -2930,8 +2942,15 @@ class BaseNode(AutoSshContainerMixin):
             self.wait_jmx_up(timeout=timeout)
 
     @log_run_info
-    def restart_scylla(self, verify_up_before=False, verify_up_after=True, timeout=1800):
-        self.restart_scylla_server(verify_up_before=verify_up_before, verify_up_after=verify_up_after, timeout=timeout)
+    def restart_scylla(
+        self, verify_up_before=False, verify_up_after=True, ignore_raft_topology_errors=False, timeout=1800
+    ):
+        self.restart_scylla_server(
+            verify_up_before=verify_up_before,
+            verify_up_after=verify_up_after,
+            ignore_raft_topology_errors=ignore_raft_topology_errors,
+            timeout=timeout,
+        )
         if verify_up_after:
             self.wait_jmx_up(timeout=timeout)
 
@@ -5821,13 +5840,13 @@ class BaseScyllaCluster:
         if check_node_health:
             node_list[0].check_node_health()
 
-    def restart_scylla(self, nodes=None, random_order=False):
+    def restart_scylla(self, nodes=None, random_order=False, ignore_raft_topology_errors=False):
         nodes_to_restart = (nodes or self.nodes)[:]  # create local copy of nodes list
         if random_order:
             random.shuffle(nodes_to_restart)
         self.log.info("Going to restart Scylla on %s", [n.name for n in nodes_to_restart])
         for node in nodes_to_restart:
-            node.stop_scylla(verify_down=True)
+            node.stop_scylla(verify_down=True, ignore_raft_topology_errors=ignore_raft_topology_errors)
             node.start_scylla(verify_up=True)
             self.log.debug("'%s' restarted.", node.name)
 
