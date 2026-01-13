@@ -7227,6 +7227,8 @@ class RollingRestartConfigChangeInternodeCompression(Nemesis):
 
     def disrupt(self):
         self.disrupt_rolling_config_change_internode_compression()
+        self.disrupt_rolling_restart_cluster()
+        self.disrupt_multiple_hard_reboot_node()
 
 
 class ClusterRollingRestartRandomOrder(Nemesis):
