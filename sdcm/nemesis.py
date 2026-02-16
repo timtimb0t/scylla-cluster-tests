@@ -6576,7 +6576,6 @@ class EnableDisableTableEncryptionAwsKmsProviderMonkey(NemesisRunner):
         )
         self.disruptions_list = self.shuffle_list_of_disruptions(self.disruptions_list)
 
-
 @target_all_nodes
 class RestartThenRepairNodeMonkey(NemesisBaseClass):
     disruptive = True
@@ -6585,6 +6584,12 @@ class RestartThenRepairNodeMonkey(NemesisBaseClass):
     def disrupt(self):
         self.runner.disrupt_restart_then_repair_node()
 
+@target_all_nodes
+class MyTestNemesis(NemesisBaseClass):
+    disruptive = True
+    def disrupt(self):
+        self.runner.disrupt_restart_then_repair_node()
+        self.runner.disrupt_nodetool_refresh(big_sstable=True)
 
 @target_all_nodes
 class MultipleHardRebootNodeMonkey(NemesisBaseClass):
@@ -7636,6 +7641,7 @@ class KillMVBuildingCoordinator(NemesisBaseClass):
 
     def disrupt(self):
         self.runner.disrupt_kill_mv_building_coordinator()
+
 
 
 class ModifyTableTwcsWindowSizeMonkey(NemesisBaseClass):
