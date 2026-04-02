@@ -3807,7 +3807,7 @@ class BaseNode(AutoSshContainerMixin):
         if res.return_code != 0:
             raise NodeNotReady(f"Node {self.name} did not join the cluster yet")
 
-    def wait_node_fully_start(self, verbose=True, timeout=3600):
+    def wait_node_fully_start(self, verbose=True, wait_for_sm_agent_start=True, timeout=3600):
         self.log.info("Waiting scylla services to start after node boot or reboot")
         self.wait_db_up(verbose=verbose, timeout=timeout)
         self.log.info("Waiting JMX services to start after node boot or reboot")
@@ -3816,6 +3816,9 @@ class BaseNode(AutoSshContainerMixin):
         self.parent_cluster.wait_for_nodes_up_and_normal(nodes=[self])
         self.log.info("Waiting for native_transport to be ready")
         self.wait_native_transport()
+        if wait_for_sm_agent_start:
+            self.log.info("Waiting for scylla-manager-agent to be ready")
+            self.wait_manager_agent_up(verbose=verbose, timeout=180)
 
     def disable_firewall(self) -> None:
         if self.distro.is_rhel_like:

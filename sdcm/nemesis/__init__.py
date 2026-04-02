@@ -780,7 +780,7 @@ class NemesisRunner:
             ):
                 self.target_node.restart()
 
-        self.target_node.wait_node_fully_start(timeout=28800)  # 8 hours
+        self.target_node.wait_node_fully_start(wait_for_sm_agent_start=True, timeout=28800)  # 8 hours
         self.run_repair()
 
     def disrupt_resetlocalschema(self):
