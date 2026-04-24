@@ -799,12 +799,7 @@ class NemesisRunner:
             with (
                 DbNodeLogger(self.cluster.nodes, "restart node", target_node=self.target_node),
                 self.action_log_scope(f"Restart {self.target_node.name} node"),
-<<<<<<< HEAD
-||||||| parent of 669db5a0f (refactor(tests): centralize expected error filters for node restarts)
-                ignore_raft_topology_cmd_failing(),
-=======
                 suppress_expected_unavailability_errors(),
->>>>>>> 669db5a0f (refactor(tests): centralize expected error filters for node restarts)
             ):
                 self.target_node.restart()
 
