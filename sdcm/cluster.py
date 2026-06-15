@@ -2748,15 +2748,22 @@ class BaseNode(AutoSshContainerMixin):
             if package_version < packaging.version.parse("3"):
                 install_cmds = dedent("""
                     tar xvfz ./unified_package.tar.gz
+                    root_dir=$(find . -maxdepth 2 -name install.sh | head -n1 | sed 's#/install.sh##')
+                    if test -z $root_dir; then exit 1; fi
+                    cd $root_dir
+                    test -x ./install.sh
                     ./install.sh --nonroot
                     sudo rm -f /tmp/scylla.yaml
                 """)
             else:
                 install_cmds = dedent("""
                     tar xvfz ./unified_package.tar.gz
-                    echo 'export PATH="$HOME/scylladb/share/cassandra/bin:$HOME/scylladb/bin:$PATH"' >> ~/.bashrc
-                    echo 'export PATH="$HOME/scylladb/share/cassandra/bin:$HOME/scylladb/bin:$PATH"' >> ~/.bash_profile
-                    cd ./scylla-*
+                    echo 'export PATH=$HOME/scylladb/share/cassandra/bin:$HOME/scylladb/bin:$PATH' >> ~/.bashrc
+                    echo 'export PATH=$HOME/scylladb/share/cassandra/bin:$HOME/scylladb/bin:$PATH' >> ~/.bash_profile
+                    root_dir=$(find . -maxdepth 2 -name install.sh | head -n1 | sed 's#/install.sh##')
+                    if test -z $root_dir; then exit 1; fi
+                    cd $root_dir
+                    test -x ./install.sh
                     ./install.sh --nonroot
                     cd -
                     sudo rm -f /tmp/scylla.yaml
@@ -2767,18 +2774,41 @@ class BaseNode(AutoSshContainerMixin):
             if package_version < packaging.version.parse("3"):
                 install_cmds = dedent("""
                     tar xvfz ./unified_package.tar.gz
+                    root_dir=$(find . -maxdepth 2 -name install.sh | head -n1 | sed 's#/install.sh##')
+                    if test -z $root_dir; then exit 1; fi
+                    cd $root_dir
+                    test -x ./install.sh
                     ./install.sh --housekeeping
                     rm -f /tmp/scylla.yaml
                 """)
             else:
                 install_cmds = dedent("""
                     tar xvfz ./unified_package.tar.gz
-                    cd ./scylla-*
+                    root_dir=$(find . -maxdepth 2 -name install.sh | head -n1 | sed 's#/install.sh##')
+                    if test -z $root_dir; then exit 1; fi
+                    cd $root_dir
+                    test -x ./install.sh
                     ./install.sh --housekeeping
                     cd -
                     rm -f /tmp/scylla.yaml
                 """)
-            self.remoter.run('sudo bash -cxe "%s"' % install_cmds)
+            self.remoter.sudo(shell_script_cmd(install_cmds, quote="'"))
+
+    def _install_traceback_with_variables_shim(self) -> None:
+        """Provide a minimal traceback_with_variables module for scylla_setup imports."""
+        shim_cmds = dedent("""
+            mkdir -p /opt/scylladb/scripts
+            cat > /opt/scylladb/scripts/traceback_with_variables.py <<'PY'
+            import traceback as _traceback
+
+            __all__ = [name for name in dir(_traceback) if not name.startswith('_')]
+            globals().update({name: getattr(_traceback, name) for name in __all__})
+
+            def __getattr__(name):
+                return getattr(_traceback, name, lambda *args, **kwargs: None)
+            PY
+        """)
+        self.remoter.run('sudo bash -cxe "%s"' % shim_cmds)
 
     def web_install_scylla(self, scylla_version: Optional[str] = None) -> None:
         """
@@ -2880,18 +2910,58 @@ class BaseNode(AutoSshContainerMixin):
 
     @log_run_info("Detecting disks")
     def detect_disks(self, nvme=True):
-        """
-        Detect local disks
-        :param nvme: NVMe(True) or SCSI(False) disk
-        :return: list of disk names
-        """
-        patt = (r"nvme*n*", r"nvme\d+n\d+") if nvme else (r"sd[b-z]", r"sd\w+")
-        result = self.remoter.run(f"ls /dev/{patt[0]}", ignore_status=True)
-        disks = re.findall(rf"/dev/{patt[1]}", result.stdout)
-        # filter out the used disk, the free disk doesn't have partition.
-        disks = [i for i in disks if disks.count(i) == 1]
-        assert disks, "Failed to find disks!"
-        self.log.debug("Found disks: %s", disks)
+        def _probe_disks(disk_regex: str) -> list[str]:
+            result = self.remoter.run(
+                "lsblk -dpno NAME,TYPE",
+                ignore_status=True,
+            )
+            disks = [
+                match.group(1)
+                for match in re.finditer(
+                    disk_regex,
+                    result.stdout,
+                    re.MULTILINE,
+                )
+            ]
+            return list(dict.fromkeys(disks))
+
+        if nvme:
+            disks = _probe_disks(r"^(/dev/nvme\d+n\d+)\s+disk$")
+            if not disks:
+                disks = _probe_disks(r"^(/dev/(?:sd|xvd|vd)[a-z]+)\s+disk$")
+        else:
+            disks = _probe_disks(r"^(/dev/(?:sd|xvd|vd)[a-z]+)\s+disk$")
+            if not disks:
+                disks = _probe_disks(r"^(/dev/nvme\d+n\d+)\s+disk$")
+
+        root_source = self.remoter.run(
+            "findmnt -n -o SOURCE /",
+            ignore_status=True,
+        ).stdout.strip()
+
+        root_pkname = self.remoter.run(
+            f"lsblk -ndo PKNAME {shlex.quote(root_source)}",
+            ignore_status=True,
+        ).stdout.strip()
+
+        root_disk = f"/dev/{root_pkname}" if root_pkname else re.sub(r"p?\d+$", "", root_source)
+
+        self.log.debug(
+            "Detected block disks: %s; root source: %s; root disk: %s",
+            disks,
+            root_source,
+            root_disk,
+        )
+
+        disks = [disk for disk in disks if disk != root_disk]
+
+        if not disks:
+            self.log.warning(
+                "No dedicated data disks found after excluding root disk %s. Scylla will use the root filesystem.",
+                root_disk,
+            )
+
+        self.log.debug("Found data disks: %s", disks)
         return disks
 
     @property
@@ -3005,33 +3075,66 @@ class BaseNode(AutoSshContainerMixin):
     @log_run_info
     def scylla_setup(self, disks, devname: str):
         """
-        TestConfig scylla
-        :param disks: list of disk names
+        Configure Scylla.
+
+        If dedicated data disks exist, configure RAID as usual.
+        If no dedicated disks exist, use the existing root filesystem.
         """
-        extra_setup_args = self.parent_cluster.params.get("append_scylla_setup_args")
+        extra_setup_args = self.parent_cluster.params.get("append_scylla_setup_args") or ""
         remoter = self.remoter
         assert remoter is not None
+
         result = remoter.run("sudo /usr/lib/scylla/scylla_setup --help")
+
         if "--swap-directory" in result.stdout:
-            # swap setup is supported
             extra_setup_args += " --swap-directory / "
+
         if self.parent_cluster.params.get("unified_package"):
             extra_setup_args += " --no-verify-package "
-        setup_cmd = "sudo /usr/lib/scylla/scylla_setup --nic {} --disks {} --setup-nic-and-disks {}".format(
-            devname, ",".join(disks), extra_setup_args
-        )
+
+        if disks:
+            storage_args = f"--disks {','.join(disks)} --setup-nic-and-disks"
+            raid_setup = True
+        else:
+            self.log.warning(
+                "No dedicated data disks found. Running scylla_setup with --no-raid-setup and using root filesystem."
+            )
+            storage_args = "--no-raid-setup"
+            raid_setup = False
+
+        setup_cmd = f"sudo /usr/lib/scylla/scylla_setup --nic {devname} {storage_args} {extra_setup_args}"
+
         try:
             self._run_scylla_setup_with_dns_retry(setup_cmd)
         except (_ScyllaSetupDnsRetryError, _ScyllaSetupNonRetryableError) as exc:
             raise exc.original_exception from exc
 
-        result = remoter.run("cat /proc/mounts")
-        assert " /var/lib/scylla " in result.stdout, "RAID setup failed, scylla directory isn't mounted correctly"
+        if raid_setup:
+            result = remoter.run("cat /proc/mounts")
+            assert " /var/lib/scylla " in result.stdout, "RAID setup failed, scylla directory isn't mounted correctly"
+        else:
+            remoter.sudo("mkdir -p /var/lib/scylla")
+            remoter.sudo("chown scylla:scylla /var/lib/scylla")
+            
+            result = remoter.run(
+                "findmnt -T /var/lib/scylla -o SOURCE,TARGET,FSTYPE,OPTIONS",
+                ignore_status=True,
+            )
+            self.log.info(
+                "Scylla data directory is using root filesystem:\n%s",
+                result.stdout,
+            )
+
         remoter.run("sudo sync")
+
         self.log.info("io.conf right after setup")
-        remoter.run("sudo cat /etc/scylla.d/io.conf")
+        remoter.run(
+            "sudo cat /etc/scylla.d/io.conf",
+            ignore_status=True,
+        )
 
         remoter.run("sudo systemctl enable scylla-server.service")
+
         if self.is_service_exists(service_name="scylla-jmx"):
             remoter.run("sudo systemctl enable scylla-jmx.service")
 
@@ -6255,15 +6358,12 @@ class BaseScyllaCluster:
             if not node.check_dns_ready():
                 raise NodeSetupFailed(
                     node=node,
-                    error_msg="DNS readiness check failed before scylla_setup. "
-                    "Network/DNS is not available on the node. "
-                    "Check network connectivity and DNS configuration. "
-                    "Diagnostics have been captured in the node log.",
+                    error_msg=(
+                        "DNS readiness check failed before scylla_setup. Network/DNS is not available on the node."
+                    ),
                 )
-            try:
-                disks = node.detect_disks(nvme=True)
-            except AssertionError:
-                disks = node.detect_disks(nvme=False)
+
+            disks = node.detect_disks(nvme=True)
             node.scylla_setup(disks, devname)
 
     def _reuse_cluster_setup(self, node):
