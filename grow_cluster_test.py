@@ -18,6 +18,7 @@ import datetime
 import random
 
 from sdcm.nemesis.monkey import DecommissionMonkey
+from sdcm.sct_events.system import InfoEvent
 from sdcm.tester import ClusterTester
 from sdcm.utils.common import get_data_dir_path, skip_optional_stage
 from sdcm import prometheus
@@ -80,10 +81,80 @@ class GrowClusterTest(ClusterTester):
         self.metrics_srv.event_stop("add_node")
         self.monitors.reconfigure_scylla_monitoring()
 
+    def test_join_nodes_high_concurrency_no_load(self):
+        """
+        Reproducer for scale-out without workload.
+
+        1) Start a single seed node.
+        2) Enable tablets and repair-based node ops via scylla.yaml overlay.
+        3) Add the requested number of nodes in batches of 20.
+        4) Do not wait for nodes to start between batches.
+        """
+        add_node_cnt = self.params.get("add_node_cnt") or 20
+        initial_cluster_size = len(self.db_cluster.nodes)
+        expected_cluster_size = initial_cluster_size + add_node_cnt
+
+        self.log.info("Seed cluster is ready with %s node(s)", initial_cluster_size)
+        self.log.info("Total number of nodes to add: %s", add_node_cnt)
+
+        joined_nodes = self.add_nodes_in_batches(add_node_cnt=add_node_cnt)
+
+        self.log.info(
+            "Added nodes: %s",
+            ", ".join(node.name for node in joined_nodes),
+        )
+
+        self.db_cluster.wait_for_init(node_list=joined_nodes)
+
+        self.db_cluster.wait_for_nodes_up_and_normal(
+            nodes=self.db_cluster.nodes,
+            verification_node=self.db_cluster.nodes[0],
+        )
+
+        self.assertEqual(
+            len(self.db_cluster.nodes),
+            expected_cluster_size,
+            "Cluster did not reach the expected size",
+        )
+
+    def add_nodes_in_batches(self, add_node_cnt):
+        """
+        Add the requested number of nodes in batches of 20.
+
+        All batches are submitted without waiting for the previously added nodes
+        to finish initialization or startup.
+        """
+        batch_size = 20
+        joined_nodes = []
+        remaining_nodes = max(0, add_node_cnt)
+
+        while remaining_nodes:
+            nodes_to_add = min(batch_size, remaining_nodes)
+
+            InfoEvent(message=f"Adding {nodes_to_add} new node(s) to the cluster").publish()
+
+            self.log.info(
+                "Adding %s node(s); %s/%s node(s) already submitted",
+                nodes_to_add,
+                len(joined_nodes),
+                add_node_cnt,
+            )
+
+            new_nodes = self.db_cluster.add_nodes(
+                count=nodes_to_add,
+                enable_auto_bootstrap=True,
+            )
+            self.db_cluster.wait_for_init(node_list=new_nodes)
+            joined_nodes.extend(new_nodes)
+            remaining_nodes -= nodes_to_add
+
+        return joined_nodes
+
     def grow_cluster(self, cluster_target_size, stress_cmd):
         self.db_cluster.add_nemesis(nemesis=self.get_nemesis_class(), tester_obj=self)
         # default=1440 min (one day) if test_duration is not defined
         duration = self.params.get("test_duration")
+        cs_thread_pool = []
         if not skip_optional_stage("main_load"):
             cs_thread_pool = self.run_stress_thread(stress_cmd=stress_cmd, duration=duration)
 
@@ -139,6 +210,7 @@ class GrowClusterTest(ClusterTester):
         4) Decommission random chosen node
         5) Repeat 3) and 4) for number of times
         """
+        cs_thread_pool = []
         if not skip_optional_stage("main_load"):
             cs_thread_pool = self.run_stress_thread(stress_cmd=self.get_stress_cmd())
 
