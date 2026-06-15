@@ -1,6 +1,17 @@
 test_duration: 600
-n_db_nodes: 40
-cluster_target_size: 60
+n_db_nodes: 1
+#cluster_target_size: 21
+add_node_cnt: 100
+
+# AWS / EC2 defaults for regular nodes
+instance_type_db: 'i4g.2xlarge'
+instance_type_loader: 'c6i.xlarge'
+instance_type_monitor: 't3.2xlarge'
+n_loaders: 1
+parallel_node_operations: true
+
+skip_test_stages:
+  main_load: true
 
 user_prefix: 'cluster-scale-40-60-test'
 
@@ -11,3 +22,5 @@ use_legacy_cluster_init: true
 cluster_health_check: false
 
 backtrace_decoding: false
+nemesis_class_name: 'NoOpMonkey'
+nemesis_during_prepare: false

@@ -7,7 +7,7 @@ longevityPipeline(
     backend: 'aws',
     region: 'eu-west-1',
     post_behavior_db_nodes: 'destroy',
-    test_name: 'longevity_test.LongevityTest.test_custom_time',
+    test_name: 'grow_cluster_test.GrowClusterTest.test_join_nodes_high_concurrency_no_load',
     test_config: '''["test-cases/scale/scale-cluster.yaml", "configurations/scale/scale-40-60.yaml"]''',
 
     timeout: [time: 12240, unit: 'MINUTES']
