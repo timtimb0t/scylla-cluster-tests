@@ -124,7 +124,7 @@ class GrowClusterTest(ClusterTester):
         All batches are submitted without waiting for the previously added nodes
         to finish initialization or startup.
         """
-        batch_size = 20
+        batch_size = 40
         joined_nodes = []
         remaining_nodes = max(0, add_node_cnt)
 
