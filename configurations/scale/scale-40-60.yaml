@@ -11,3 +11,5 @@ use_legacy_cluster_init: true
 cluster_health_check: false
 
 backtrace_decoding: false
+unified_package: 'https://s3.amazonaws.com/downloads.scylladb.com/testing/unstable/scylla/master/relocatable/byo/2026-06-23T12%3A18%3A50Z/scylla-unified-2026.1.6-0.20260623.8ca6c7b78199.x86_64.tar.gz'
+seeds_num: 3
