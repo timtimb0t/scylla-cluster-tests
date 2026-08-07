@@ -19,8 +19,8 @@ n_loaders: 4
 nemesis_grow_shrink_instance_type: 'i8g.2xlarge'
 instance_type_db: 'i8g.large'
 
-nemesis_class_name: 'SisyphusMonkey'
-nemesis_selector: 'supports_high_disk_utilization'
+nemesis_class_name: ['SisyphusMonkey', 'SisyphusMonkey']
+nemesis_selector: ['supports_high_disk_utilization', 'DecommissionMonkey']
 nemesis_seed: '019'
 nemesis_during_prepare: false
 
