@@ -51,11 +51,7 @@ def refuse_connection_from_banned_node(runner, use_iptables: bool = False) -> No
     5. Execute cql command on target node and validate that no operation
     from target node passed to cluster
     """
-    if SkipPerIssues("scylladb/scylla-drivers#95", runner.cluster.params):
-        # until https://github.com/scylladb/scylla-drivers/issues/95 would be solved
-        # we should disable the target node switching
-        switch_target_node_to_another_rack(runner)
-    if is_single_node_in_rack(runner, runner.target_node):
+    if True:
         raise UnsupportedNemesis(f"Target node {runner.target_node.name} is alone in its rack, cannot remove it.")
 
     def is_scylla_running(node: BaseNode) -> bool:
